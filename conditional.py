@@ -7,8 +7,8 @@ from conv_block import ConvBlock
 from pos_encoding import pos_encoding
 
 
-class UNet(nn.Module):
-    def __init__(self, in_ch=1, time_embed_dim=100):
+class UNetCond(nn.Module):
+    def __init__(self, in_ch=1, time_embed_dim=100, num_labels=None):
         super().__init__()
         self.time_embed_dim = time_embed_dim
 
@@ -22,8 +22,14 @@ class UNet(nn.Module):
         self.maxpool = nn.MaxPool2d(2)
         self.upsample = nn.Upsample(scale_factor=2, mode="bilinear")
 
-    def forward(self, x, timesteps):
+        if num_labels is not None:
+            self.label_embed = nn.Embedding(num_labels, time_embed_dim)
+
+    def forward(self, x, timesteps, labels=None):
         v = pos_encoding(timesteps, self.time_embed_dim, x.device)
+
+        if labels is not None:
+            v = v + self.label_embed(labels)
 
         x1 = self.down1(x, v)
         x = self.maxpool(x1)
@@ -42,7 +48,7 @@ class UNet(nn.Module):
         return x
 
 
-class Diffuser:
+class DiffuserCond:
     def __init__(
         self, num_timesteps=1000, beta_start=0.0001, beta_end=0.02, device="cpu"
     ):
@@ -65,7 +71,7 @@ class Diffuser:
         x_t = torch.sqrt(alpha_bar) * x_0 + torch.sqrt(1 - alpha_bar) * noise
         return x_t, noise
 
-    def denoise(self, model, x, t):
+    def denoise(self, model, x, t, labels):
         T = self.num_timesteps
         assert (t >= 1).all() and (t <= T).all()
 
@@ -81,7 +87,7 @@ class Diffuser:
 
         model.eval()
         with torch.no_grad():
-            eps = model(x, t)
+            eps = model(x, t, labels)
         model.train()
 
         noise = torch.randn_like(x, device=self.device)
@@ -99,13 +105,16 @@ class Diffuser:
         to_pil = transforms.ToPILImage()
         return to_pil(x)
 
-    def sample(self, model, x_shape=(20, 1, 28, 28)):
+    def sample(self, model, x_shape=(20, 1, 28, 28), labels=None):
         batch_size = x_shape[0]
         x = torch.randn(x_shape, device=self.device)
 
+        if labels is None:
+            labels = torch.randint(0, 10, (len(x),), device=self.device)
+
         for i in tqdm(range(self.num_timesteps, 0, -1)):
             t = torch.tensor([i] * batch_size, device=self.device, dtype=torch.long)
-            x = self.denoise(model, x, t)
+            x = self.denoise(model, x, t, labels)
 
         images = [self.reverse_to_img(x[i]) for i in range(batch_size)]
-        return images
+        return images, labels
