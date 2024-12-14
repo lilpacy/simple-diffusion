@@ -3,7 +3,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import DataLoader, Dataset
-from transformers import GPT2TokenizerFast
+from transformers import GPT2TokenizerFast, get_linear_schedule_with_warmup
 import tqdm
 import random
 
@@ -52,7 +52,7 @@ def collate_fn(batch):
     return input_ids, target_ids
 
 def causal_mask(size):
-    mask = torch.full((size, size), float("-inf"))
+    mask = torch.full((size, size), -1e9)
     mask = torch.triu(mask, diagonal=1)
     return mask
 
@@ -62,7 +62,7 @@ class PositionalEncoding(nn.Module):
         pe = torch.zeros(max_len, model_dim)
         position = torch.arange(0, max_len, dtype=torch.float).unsqueeze(1)
         div_term = torch.exp(
-            torch.arange(0, model_dim, 2).float() * (-math.log(10000.0) / model_dim)
+            (torch.arange(0, model_dim, 2).float() * (-math.log(10000.0) / model_dim))
         )
         pe[:, 0::2] = torch.sin(position * div_term)
         pe[:, 1::2] = torch.cos(position * div_term)
@@ -80,7 +80,7 @@ class TransformerLayer(nn.Module):
         self.layer_norm1 = nn.LayerNorm(model_dim)
         self.feed_forward = nn.Sequential(
             nn.Linear(model_dim, 4 * model_dim),
-            nn.ReLU(),
+            nn.GELU(),
             nn.Linear(4 * model_dim, model_dim),
         )
         self.layer_norm2 = nn.LayerNorm(model_dim)
@@ -102,6 +102,9 @@ class SimpleTransformer(nn.Module):
             [TransformerLayer(model_dim, num_heads) for _ in range(num_layers)]
         )
         self.output_layer = nn.Linear(model_dim, vocab_size)
+        for p in self.parameters():
+            if p.dim() > 1:
+                nn.init.xavier_uniform_(p)
 
     def forward(self, x):
         mask = causal_mask(x.size(1)).to(x.device)
@@ -112,29 +115,29 @@ class SimpleTransformer(nn.Module):
         logits = self.output_layer(x)
         return logits
 
-
 def load_data():
-    # 任意のテキストデータを使用可能。ここではwikitext-2-rawを使用。
-    # 必要な場合はdatasetsをインストールし、以下コメントアウトを解除
     from datasets import load_dataset
-
     dataset = load_dataset("Salesforce/wikitext", "wikitext-2-raw-v1")
     texts = dataset["train"]["text"]
-    # 簡易的なテキスト例（ユーザ環境で置換可能）
     # texts = ["Once upon a time there was a brave princess who"] * 2000
     return texts
 
 texts = load_data()
 train_dataset = TextDataset(texts, tokenizer, max_length=128)
 train_dataloader = DataLoader(
-    train_dataset, batch_size=16, shuffle=True, collate_fn=collate_fn
+    train_dataset, batch_size=2, shuffle=True, collate_fn=collate_fn
 )
 
 model = SimpleTransformer(
-    vocab_size=len(tokenizer), model_dim=256, num_heads=4, num_layers=4
+    vocab_size=len(tokenizer), model_dim=32, num_heads=2, num_layers=2
 ).to(device)
 optimizer = torch.optim.Adam(model.parameters(), lr=1e-4)
 
+total_steps = len(train_dataloader) * 5
+warmup_steps = total_steps // 10
+scheduler = get_linear_schedule_with_warmup(
+    optimizer, num_warmup_steps=warmup_steps, num_training_steps=total_steps
+)
 
 def sample_text(model, start_text, max_length=50, top_k=50, temperature=1.0):
     model.eval()
@@ -142,24 +145,23 @@ def sample_text(model, start_text, max_length=50, top_k=50, temperature=1.0):
         input_ids = tokenizer.encode(start_text, return_tensors="pt").to(device)
         for _ in range(max_length):
             logits = model(input_ids)
-            next_token_logits = logits[:, -1, :] / temperature
-            filtered_logits = next_token_logits
+            logits = logits[:, -1, :] / temperature
             if top_k > 0:
-                values, _ = torch.topk(next_token_logits, top_k)
+                values, _ = torch.topk(logits, top_k)
                 min_values = values[:, -1].unsqueeze(1)
-                filtered_logits = torch.where(
-                    next_token_logits < min_values,
-                    torch.full_like(next_token_logits, float("-inf")),
-                    next_token_logits,
+                logits = torch.where(
+                    logits < min_values, torch.full_like(logits, -1e9), logits
                 )
-            probs = F.softmax(filtered_logits, dim=-1)
+            probs = F.softmax(logits, dim=-1)
+            if torch.isnan(probs).any() or torch.isinf(probs).any():
+                break
             next_token_id = torch.multinomial(probs, num_samples=1)
-            input_ids = torch.cat([input_ids, next_token_id], dim=1)
             if next_token_id.item() == tokenizer.eos_token_id:
                 break
+            input_ids = torch.cat([input_ids, next_token_id], dim=1)
         return tokenizer.decode(input_ids[0], skip_special_tokens=True)
 
-for epoch in range(3):
+for epoch in range(10):
     model.train()
     total_loss = 0
     for input_ids, target_ids in tqdm.tqdm(train_dataloader):
@@ -172,11 +174,14 @@ for epoch in range(3):
             target_ids.view(-1),
             ignore_index=tokenizer.pad_token_id,
         )
+        if torch.isnan(loss) or torch.isinf(loss):
+            continue
         loss.backward()
+        torch.nn.utils.clip_grad_norm_(model.parameters(), 0.1)
         optimizer.step()
+        scheduler.step()
         total_loss += loss.item()
     print("Epoch:", epoch + 1, "Loss:", total_loss / len(train_dataloader))
     print(sample_text(model, "Once upon a time"))
 
-# save
 torch.save(model.state_dict(), "transformer_model.pth")
