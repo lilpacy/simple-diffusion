@@ -13,21 +13,8 @@ import torchvision
 #################################################################################
 #                               Minimal Transformer Code                         #
 #################################################################################
-# 本コードは、UNetベースのDiffusionモデルをTransformerベース(DiT)に変換した
-# もっとも素朴かつシンプルな実装例です。
-# 依存ファイル( conv_block.py, pos_encoding.py )や外部ライブラリからのimportは行わず、
-# 全てを1ファイルにまとめています。
-
-# 以下はDiTモデルの最小実装です。timmのVision Transformerから必要な部分を簡易に再実装します。
-#################################################################################
-
 
 class PatchEmbed(nn.Module):
-    """
-    非常に単純化したPatchEmbed。
-    パッチサイズpatch_size x patch_sizeで画像を分割し、各パッチをflattenし、Linear層で埋め込みます。
-    """
-
     def __init__(self, img_size, patch_size, in_chans, embed_dim, bias=True):
         super().__init__()
         assert img_size % patch_size == 0, "Image size must be divisible by patch size."
@@ -39,49 +26,34 @@ class PatchEmbed(nn.Module):
         )
 
     def forward(self, x):
-        # x: (N, C, H, W)
-        x = self.proj(x)  # (N, D, H/P, W/P)
-        x = x.flatten(2).transpose(1, 2)  # (N, T, D)
+        x = self.proj(x)
+        x = x.flatten(2).transpose(1, 2)
         return x
 
 
 class Attention(nn.Module):
-    """
-    単純なマルチヘッドアテンション
-    """
-
     def __init__(self, dim, num_heads=8, qkv_bias=True, **kwargs):
         super().__init__()
         self.num_heads = num_heads
         head_dim = dim // num_heads
         self.scale = head_dim**-0.5
-
         self.qkv = nn.Linear(dim, dim * 3, bias=qkv_bias)
         self.proj = nn.Linear(dim, dim)
 
     def forward(self, x):
-        # x: (N, T, D)
         N, T, D = x.shape
-        qkv = self.qkv(x)  # (N, T, 3D)
+        qkv = self.qkv(x)
         qkv = qkv.reshape(N, T, 3, self.num_heads, D // self.num_heads)
-        q, k, v = (
-            qkv[:, :, 0],
-            qkv[:, :, 1],
-            qkv[:, :, 2],
-        )  # (N, T, num_heads, D/num_heads)
+        q, k, v = qkv[:, :, 0], qkv[:, :, 1], qkv[:, :, 2]
 
-        attn = (q * self.scale) @ k.transpose(-2, -1)  # (N, T, num_heads, T)
+        attn = (q * self.scale) @ k.transpose(-2, -1)
         attn = attn.softmax(dim=-1)
-        out = (attn @ v).transpose(2, 1).reshape(N, T, D)  # (N, T, D)
+        out = (attn @ v).transpose(2, 1).reshape(N, T, D)
         out = self.proj(out)
         return out
 
 
 class Mlp(nn.Module):
-    """
-    MLPブロック
-    """
-
     def __init__(self, in_features, hidden_features, act_layer=nn.GELU, drop=0.0):
         super().__init__()
         self.fc1 = nn.Linear(in_features, hidden_features)
@@ -97,21 +69,14 @@ class Mlp(nn.Module):
         x = self.drop(x)
         return x
 
-
 #################################################################################
 #                                DiT Model Implementation                        #
 #################################################################################
 
-
 def modulate(x, shift, scale):
     return x * (1 + scale.unsqueeze(1)) + shift.unsqueeze(1)
 
-
 class TimestepEmbedder(nn.Module):
-    """
-    時間ステップを埋め込む
-    """
-
     def __init__(self, hidden_size, frequency_embedding_size=256):
         super().__init__()
         self.mlp = nn.Sequential(
@@ -144,10 +109,6 @@ class TimestepEmbedder(nn.Module):
 
 
 class LabelEmbedder(nn.Module):
-    """
-    ラベルを埋め込む (今回はダミーで使用)
-    """
-
     def __init__(self, num_classes, hidden_size, dropout_prob):
         super().__init__()
         use_cfg_embedding = dropout_prob > 0
@@ -237,14 +198,12 @@ def get_2d_sincos_pos_embed(embed_dim, grid_size, cls_token=False, extra_tokens=
         )
     return pos_embed
 
-
 def get_2d_sincos_pos_embed_from_grid(embed_dim, grid):
     assert embed_dim % 2 == 0
     emb_h = get_1d_sincos_pos_embed_from_grid(embed_dim // 2, grid[0])
     emb_w = get_1d_sincos_pos_embed_from_grid(embed_dim // 2, grid[1])
     emb = np.concatenate([emb_h, emb_w], axis=1)
     return emb
-
 
 def get_1d_sincos_pos_embed_from_grid(embed_dim, pos):
     assert embed_dim % 2 == 0
@@ -263,11 +222,11 @@ class DiT(nn.Module):
     def __init__(
         self,
         input_size=28,
-        patch_size=1,
+        patch_size=4,  # 大きめのパッチサイズで計算量削減
         in_channels=1,
-        hidden_size=384,
-        depth=12,
-        num_heads=6,
+        hidden_size=192,  # 小さめのhidden_size
+        depth=6,  # 層数を減らす
+        num_heads=4,  # ヘッド数も減らす
         mlp_ratio=4.0,
         class_dropout_prob=0.0,
         num_classes=1,
@@ -306,7 +265,6 @@ class DiT(nn.Module):
                 torch.nn.init.xavier_uniform_(module.weight)
                 if module.bias is not None:
                     nn.init.constant_(module.bias, 0)
-
         self.apply(_basic_init)
 
         pos_embed = get_2d_sincos_pos_embed(
@@ -317,9 +275,7 @@ class DiT(nn.Module):
         w = self.x_embedder.proj.weight.data
         nn.init.xavier_uniform_(w.view([w.shape[0], -1]))
         nn.init.constant_(self.x_embedder.proj.bias, 0)
-
         nn.init.normal_(self.y_embedder.embedding_table.weight, std=0.02)
-
         nn.init.normal_(self.t_embedder.mlp[0].weight, std=0.02)
         nn.init.normal_(self.t_embedder.mlp[2].weight, std=0.02)
 
@@ -334,7 +290,7 @@ class DiT(nn.Module):
 
     def unpatchify(self, x):
         c = self.out_channels
-        p = self.x_embedder.patch_size
+        p = self.patch_size
         h = w = int(x.shape[1] ** 0.5)
         x = x.reshape(shape=(x.shape[0], h, w, p, p, c))
         x = x.permute(0, 5, 1, 3, 2, 4)
@@ -342,9 +298,6 @@ class DiT(nn.Module):
         return x
 
     def forward(self, x, t, y):
-        # x: (N, C, H, W)
-        # t: (N,)
-        # y: (N,)
         x = self.x_embedder(x) + self.pos_embed
         t = self.t_embedder(t)
         y = self.y_embedder(y, self.training)
@@ -354,7 +307,6 @@ class DiT(nn.Module):
         x = self.final_layer(x, c)
         x = self.unpatchify(x)
         return x
-
 
 #################################################################################
 #                                 Diffusion Class                                #
@@ -396,7 +348,6 @@ class Diffuser:
 
         model.eval()
         with torch.no_grad():
-            # クラスラベルはダミー(0)を使用
             y = torch.zeros((x.size(0),), dtype=torch.long, device=self.device)
             eps = model(x, t, y)
         model.train()
@@ -425,12 +376,11 @@ class Diffuser:
         images = [self.reverse_to_img(x[i]) for i in range(batch_size)]
         return images
 
-
 #################################################################################
 #                               Training & Sampling                              #
 #################################################################################
 if __name__ == "__main__":
-    batch_size = 16
+    batch_size = 64
     num_timesteps = 1000
     epochs = 10
     lr = 1e-3
@@ -438,10 +388,11 @@ if __name__ == "__main__":
         "cuda"
         if torch.cuda.is_available()
         else "mps"
-        if torch.backends.mps.is_available()
+        if hasattr(torch.backends, "mps") and torch.backends.mps.is_available()
         else "cpu"
     )
     print(f"Using device: {device}")
+    device_type = "cuda" if device == "cuda" else "mps" if device == "mps" else "cpu"
 
     preprocess = transforms.ToTensor()
     dataset = torchvision.datasets.MNIST(
@@ -452,11 +403,11 @@ if __name__ == "__main__":
     diffuser = Diffuser(num_timesteps, device=device)
     model = DiT(
         input_size=28,
-        patch_size=1,
+        patch_size=4,
         in_channels=1,
-        hidden_size=384,
-        depth=12,
-        num_heads=6,
+        hidden_size=192,
+        depth=6,
+        num_heads=4,
         mlp_ratio=4.0,
         class_dropout_prob=0.0,
         num_classes=1,
@@ -465,24 +416,30 @@ if __name__ == "__main__":
     model.to(device)
     optimizer = Adam(model.parameters(), lr=lr)
 
+    scaler = torch.amp.GradScaler(enabled=(device in ["cuda", "mps"]))
+
     losses = []
     for epoch in range(epochs):
         loss_sum = 0.0
         cnt = 0
         for images, labels in tqdm(dataloader):
-            optimizer.zero_grad()
             x = images.to(device)
             t = torch.randint(1, num_timesteps + 1, (len(x),), device=device)
             x_noisy, noise = diffuser.add_noise(x, t)
-
-            # ダミーラベル
             y = torch.zeros((x_noisy.size(0),), dtype=torch.long, device=device)
 
-            noise_pred = model(x_noisy, t, y)
-            loss = F.mse_loss(noise, noise_pred)
+            optimizer.zero_grad()
+            with torch.autocast(
+                device_type=device_type,
+                dtype=torch.float16,
+                enabled=(device in ["cuda", "mps"]),
+            ):
+                noise_pred = model(x_noisy, t, y)
+                loss = F.mse_loss(noise, noise_pred)
 
-            loss.backward()
-            optimizer.step()
+            scaler.scale(loss).to(torch.float32).backward()
+            scaler.step(optimizer)
+            scaler.update()
 
             loss_sum += loss.item()
             cnt += 1
@@ -502,9 +459,13 @@ if __name__ == "__main__":
     model.eval()
     diffuser = Diffuser(num_timesteps, device=device)
     model.to(device)
-    images = diffuser.sample(model)
+    with torch.autocast(
+        device_type=device_type,
+        dtype=torch.float16,
+        enabled=(device in ["cuda", "mps"]),
+    ):
+        images = diffuser.sample(model)
 
-    # 表示
     def show_images(images, rows=2, cols=10):
         fig = plt.figure(figsize=(cols, rows))
         i = 0
