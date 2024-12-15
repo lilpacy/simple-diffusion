@@ -2,54 +2,7 @@ import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.utils.data import DataLoader, Dataset
-from transformers import GPT2TokenizerFast, get_linear_schedule_with_warmup
-import tqdm
-import random
 
-device = (
-    "cuda"
-    if torch.cuda.is_available()
-    else "mps"
-    if torch.backends.mps.is_available()
-    else "cpu"
-)
-torch.manual_seed(42)
-random.seed(42)
-
-tokenizer = GPT2TokenizerFast.from_pretrained("gpt2")
-tokenizer.pad_token = tokenizer.eos_token
-
-class TextDataset(Dataset):
-    def __init__(self, texts, tokenizer, max_length=128):
-        self.examples = []
-        for t in texts:
-            enc = tokenizer.encode(t, truncation=True, max_length=max_length)
-            if len(enc) < 2:
-                continue
-            self.examples.append(enc)
-
-    def __len__(self):
-        return len(self.examples)
-
-    def __getitem__(self, idx):
-        enc = self.examples[idx]
-        input_ids = enc[:-1]
-        target_ids = enc[1:]
-        return torch.tensor(input_ids, dtype=torch.long), torch.tensor(
-            target_ids, dtype=torch.long
-        )
-
-def collate_fn(batch):
-    input_ids = [b[0] for b in batch]
-    target_ids = [b[1] for b in batch]
-    input_ids = nn.utils.rnn.pad_sequence(
-        input_ids, batch_first=True, padding_value=tokenizer.pad_token_id
-    )
-    target_ids = nn.utils.rnn.pad_sequence(
-        target_ids, batch_first=True, padding_value=tokenizer.pad_token_id
-    )
-    return input_ids, target_ids
 
 def causal_mask(size):
     mask = torch.full((size, size), -1e9)
@@ -115,73 +68,28 @@ class SimpleTransformer(nn.Module):
         logits = self.output_layer(x)
         return logits
 
-def load_data():
-    from datasets import load_dataset
-    dataset = load_dataset("Salesforce/wikitext", "wikitext-2-raw-v1")
-    texts = dataset["train"]["text"]
-    # texts = ["Once upon a time there was a brave princess who"] * 2000
-    return texts
-
-texts = load_data()
-train_dataset = TextDataset(texts, tokenizer, max_length=128)
-train_dataloader = DataLoader(
-    train_dataset, batch_size=2, shuffle=True, collate_fn=collate_fn
-)
-
-model = SimpleTransformer(
-    vocab_size=len(tokenizer), model_dim=32, num_heads=2, num_layers=2
-).to(device)
-optimizer = torch.optim.Adam(model.parameters(), lr=1e-4)
-
-total_steps = len(train_dataloader) * 5
-warmup_steps = total_steps // 10
-scheduler = get_linear_schedule_with_warmup(
-    optimizer, num_warmup_steps=warmup_steps, num_training_steps=total_steps
-)
-
-def sample_text(model, start_text, max_length=50, top_k=50, temperature=1.0):
-    model.eval()
-    with torch.no_grad():
-        input_ids = tokenizer.encode(start_text, return_tensors="pt").to(device)
-        for _ in range(max_length):
-            logits = model(input_ids)
-            logits = logits[:, -1, :] / temperature
-            if top_k > 0:
-                values, _ = torch.topk(logits, top_k)
-                min_values = values[:, -1].unsqueeze(1)
-                logits = torch.where(
-                    logits < min_values, torch.full_like(logits, -1e9), logits
-                )
-            probs = F.softmax(logits, dim=-1)
-            if torch.isnan(probs).any() or torch.isinf(probs).any():
-                break
-            next_token_id = torch.multinomial(probs, num_samples=1)
-            if next_token_id.item() == tokenizer.eos_token_id:
-                break
-            input_ids = torch.cat([input_ids, next_token_id], dim=1)
-        return tokenizer.decode(input_ids[0], skip_special_tokens=True)
-
-for epoch in range(10):
-    model.train()
-    total_loss = 0
-    for input_ids, target_ids in tqdm.tqdm(train_dataloader):
-        input_ids = input_ids.to(device)
-        target_ids = target_ids.to(device)
-        optimizer.zero_grad()
-        logits = model(input_ids)
-        loss = F.cross_entropy(
-            logits.view(-1, logits.size(-1)),
-            target_ids.view(-1),
-            ignore_index=tokenizer.pad_token_id,
-        )
-        if torch.isnan(loss) or torch.isinf(loss):
-            continue
-        loss.backward()
-        torch.nn.utils.clip_grad_norm_(model.parameters(), 0.1)
-        optimizer.step()
-        scheduler.step()
-        total_loss += loss.item()
-    print("Epoch:", epoch + 1, "Loss:", total_loss / len(train_dataloader))
-    print(sample_text(model, "Once upon a time"))
-
-torch.save(model.state_dict(), "transformer_model.pth")
+    def sample_text(
+        self, tokenizer, start_text, max_length=50, top_k=50, temperature=1.0
+    ):
+        self.eval()
+        with torch.no_grad():
+            input_ids = tokenizer.encode(start_text, return_tensors="pt").to(
+                next(self.parameters()).device
+            )
+            for _ in range(max_length):
+                logits = self(input_ids)
+                logits = logits[:, -1, :] / temperature
+                if top_k > 0:
+                    values, _ = torch.topk(logits, top_k)
+                    min_values = values[:, -1].unsqueeze(1)
+                    logits = torch.where(
+                        logits < min_values, torch.full_like(logits, -1e9), logits
+                    )
+                probs = F.softmax(logits, dim=-1)
+                if torch.isnan(probs).any() or torch.isinf(probs).any():
+                    break
+                next_token_id = torch.multinomial(probs, num_samples=1)
+                if next_token_id.item() == tokenizer.eos_token_id:
+                    break
+                input_ids = torch.cat([input_ids, next_token_id], dim=1)
+            return tokenizer.decode(input_ids[0], skip_special_tokens=True)
