@@ -1,18 +1,10 @@
 import torch
 from torch import nn
-from torch.nn import functional as F
 import math
 import numpy as np
 from torchvision import transforms
-from torch.utils.data import DataLoader
-from torch.optim import Adam
 from tqdm import tqdm
-import matplotlib.pyplot as plt
-import torchvision
 
-#################################################################################
-#                               Minimal Transformer Code                         #
-#################################################################################
 
 class PatchEmbed(nn.Module):
     def __init__(self, img_size, patch_size, in_chans, embed_dim, bias=True):
@@ -45,7 +37,6 @@ class Attention(nn.Module):
         qkv = self.qkv(x)
         qkv = qkv.reshape(N, T, 3, self.num_heads, D // self.num_heads)
         q, k, v = qkv[:, :, 0], qkv[:, :, 1], qkv[:, :, 2]
-
         attn = (q * self.scale) @ k.transpose(-2, -1)
         attn = attn.softmax(dim=-1)
         out = (attn @ v).transpose(2, 1).reshape(N, T, D)
@@ -69,12 +60,10 @@ class Mlp(nn.Module):
         x = self.drop(x)
         return x
 
-#################################################################################
-#                                DiT Model Implementation                        #
-#################################################################################
 
 def modulate(x, shift, scale):
     return x * (1 + scale.unsqueeze(1)) + shift.unsqueeze(1)
+
 
 class TimestepEmbedder(nn.Module):
     def __init__(self, hidden_size, frequency_embedding_size=256):
@@ -109,28 +98,11 @@ class TimestepEmbedder(nn.Module):
 
 
 class LabelEmbedder(nn.Module):
-    def __init__(self, num_classes, hidden_size, dropout_prob):
+    def __init__(self, num_classes, hidden_size):
         super().__init__()
-        use_cfg_embedding = dropout_prob > 0
-        self.embedding_table = nn.Embedding(
-            num_classes + use_cfg_embedding, hidden_size
-        )
-        self.num_classes = num_classes
-        self.dropout_prob = dropout_prob
+        self.embedding_table = nn.Embedding(num_classes, hidden_size)
 
-    def token_drop(self, labels, force_drop_ids=None):
-        if force_drop_ids is None:
-            drop_ids = (
-                torch.rand(labels.shape[0], device=labels.device) < self.dropout_prob
-            )
-        else:
-            drop_ids = force_drop_ids == 1
-        labels = torch.where(drop_ids, self.num_classes, labels)
-        return labels
-
-    def forward(self, labels, train, force_drop_ids=None):
-        if (train and self.dropout_prob > 0) or (force_drop_ids is not None):
-            labels = self.token_drop(labels, force_drop_ids)
+    def forward(self, labels):
         embeddings = self.embedding_table(labels)
         return embeddings
 
@@ -198,12 +170,14 @@ def get_2d_sincos_pos_embed(embed_dim, grid_size, cls_token=False, extra_tokens=
         )
     return pos_embed
 
+
 def get_2d_sincos_pos_embed_from_grid(embed_dim, grid):
     assert embed_dim % 2 == 0
     emb_h = get_1d_sincos_pos_embed_from_grid(embed_dim // 2, grid[0])
     emb_w = get_1d_sincos_pos_embed_from_grid(embed_dim // 2, grid[1])
     emb = np.concatenate([emb_h, emb_w], axis=1)
     return emb
+
 
 def get_1d_sincos_pos_embed_from_grid(embed_dim, pos):
     assert embed_dim % 2 == 0
@@ -222,13 +196,12 @@ class DiT(nn.Module):
     def __init__(
         self,
         input_size=28,
-        patch_size=4,  # 大きめのパッチサイズで計算量削減
+        patch_size=2,  # 小さくしてより細かい特徴を捉える
         in_channels=1,
-        hidden_size=192,  # 小さめのhidden_size
-        depth=6,  # 層数を減らす
-        num_heads=4,  # ヘッド数も減らす
+        hidden_size=192,  # 大きくしてモデル容量増加
+        depth=6,  # ブロック数を2倍に増やす
+        num_heads=4,
         mlp_ratio=4.0,
-        class_dropout_prob=0.0,
         num_classes=1,
         learn_sigma=False,
     ):
@@ -237,15 +210,14 @@ class DiT(nn.Module):
         self.in_channels = in_channels
         self.out_channels = in_channels * 2 if learn_sigma else in_channels
         self.patch_size = patch_size
-        self.num_heads = num_heads
 
         self.x_embedder = PatchEmbed(
             input_size, patch_size, in_channels, hidden_size, bias=True
         )
         self.t_embedder = TimestepEmbedder(hidden_size)
-        self.y_embedder = LabelEmbedder(num_classes, hidden_size, class_dropout_prob)
-        num_patches = self.x_embedder.num_patches
+        self.y_embedder = LabelEmbedder(num_classes, hidden_size)
 
+        num_patches = self.x_embedder.num_patches
         self.pos_embed = nn.Parameter(
             torch.zeros(1, num_patches, hidden_size), requires_grad=False
         )
@@ -265,6 +237,7 @@ class DiT(nn.Module):
                 torch.nn.init.xavier_uniform_(module.weight)
                 if module.bias is not None:
                     nn.init.constant_(module.bias, 0)
+
         self.apply(_basic_init)
 
         pos_embed = get_2d_sincos_pos_embed(
@@ -275,7 +248,7 @@ class DiT(nn.Module):
         w = self.x_embedder.proj.weight.data
         nn.init.xavier_uniform_(w.view([w.shape[0], -1]))
         nn.init.constant_(self.x_embedder.proj.bias, 0)
-        nn.init.normal_(self.y_embedder.embedding_table.weight, std=0.02)
+
         nn.init.normal_(self.t_embedder.mlp[0].weight, std=0.02)
         nn.init.normal_(self.t_embedder.mlp[2].weight, std=0.02)
 
@@ -285,7 +258,7 @@ class DiT(nn.Module):
 
         nn.init.constant_(self.final_layer.adaLN_modulation[-1].weight, 0)
         nn.init.constant_(self.final_layer.adaLN_modulation[-1].bias, 0)
-        nn.init.constant_(self.final_layer.linear.weight, 0)
+        nn.init.xavier_uniform_(self.final_layer.linear.weight)  # 修正箇所
         nn.init.constant_(self.final_layer.linear.bias, 0)
 
     def unpatchify(self, x):
@@ -297,21 +270,19 @@ class DiT(nn.Module):
         x = x.reshape(shape=(x.shape[0], c, h * p, w * p))
         return x
 
-    def forward(self, x, t, y):
+    def forward(self, x, t, labels):
         x = self.x_embedder(x) + self.pos_embed
-        t = self.t_embedder(t)
-        y = self.y_embedder(y, self.training)
-        c = t + y
+        t_emb = self.t_embedder(t)
+        y_emb = self.y_embedder(labels)
+        c = t_emb + y_emb
         for block in self.blocks:
             x = block(x, c)
         x = self.final_layer(x, c)
         x = self.unpatchify(x)
         return x
 
-#################################################################################
-#                                 Diffusion Class                                #
-#################################################################################
-class Diffuser:
+
+class DiffuserCond:
     def __init__(
         self, num_timesteps=1000, beta_start=0.0001, beta_end=0.02, device="cpu"
     ):
@@ -332,24 +303,27 @@ class Diffuser:
         x_t = torch.sqrt(alpha_bar) * x_0 + torch.sqrt(1 - alpha_bar) * noise
         return x_t, noise
 
-    def denoise(self, model, x, t):
+    def denoise(self, model, x, t, labels):
         T = self.num_timesteps
         assert (t >= 1).all() and (t <= T).all()
 
         t_idx = t - 1
         alpha = self.alphas[t_idx]
         alpha_bar = self.alpha_bars[t_idx]
-        alpha_bar_prev = self.alpha_bars[t_idx - 1]
 
-        N = alpha.size(0)
-        alpha = alpha.view(N, 1, 1, 1)
-        alpha_bar = alpha_bar.view(N, 1, 1, 1)
-        alpha_bar_prev = alpha_bar_prev.view(N, 1, 1, 1)
+        # t=1 の場合は alpha_bar_prev を 0 に設定
+        alpha_bar_prev = torch.zeros_like(alpha_bar)
+        mask = t > 1
+        if mask.any():
+            alpha_bar_prev[mask] = self.alpha_bars[t_idx[mask] - 1]
+
+        alpha = alpha.view(-1, 1, 1, 1)
+        alpha_bar = alpha_bar.view(-1, 1, 1, 1)
+        alpha_bar_prev = alpha_bar_prev.view(-1, 1, 1, 1)
 
         model.eval()
         with torch.no_grad():
-            y = torch.zeros((x.size(0),), dtype=torch.long, device=self.device)
-            eps = model(x, t, y)
+            eps = model(x, t, labels)
         model.train()
 
         noise = torch.randn_like(x, device=self.device)
@@ -367,114 +341,51 @@ class Diffuser:
         to_pil = transforms.ToPILImage()
         return to_pil(x)
 
-    def sample(self, model, x_shape=(20, 1, 28, 28)):
+    def sample(self, model, x_shape=(20, 1, 28, 28), labels=None):
         batch_size = x_shape[0]
         x = torch.randn(x_shape, device=self.device)
+
+        if labels is None:
+            labels = torch.randint(0, 10, (len(x),), device=self.device)
+
         for i in tqdm(range(self.num_timesteps, 0, -1)):
             t = torch.tensor([i] * batch_size, device=self.device, dtype=torch.long)
-            x = self.denoise(model, x, t)
+            x = self.denoise(model, x, t, labels)
+
         images = [self.reverse_to_img(x[i]) for i in range(batch_size)]
-        return images
+        return images, labels
 
-#################################################################################
-#                               Training & Sampling                              #
-#################################################################################
-if __name__ == "__main__":
-    batch_size = 64
-    num_timesteps = 1000
-    epochs = 10
-    lr = 1e-3
-    device = (
-        "cuda"
-        if torch.cuda.is_available()
-        else "mps"
-        if hasattr(torch.backends, "mps") and torch.backends.mps.is_available()
-        else "cpu"
-    )
-    print(f"Using device: {device}")
-    device_type = "cuda" if device == "cuda" else "mps" if device == "mps" else "cpu"
 
-    preprocess = transforms.ToTensor()
-    dataset = torchvision.datasets.MNIST(
-        root="data", train=True, download=True, transform=preprocess
-    )
-    dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
+# モデルのハイパーパラメータ
+input_size = 28
+patch_size = 2
+in_channels = 1
+hidden_size = 192
+depth = 6
+num_heads = 4
+mlp_ratio = 4.0
+num_classes = 1
+learn_sigma = False
 
-    diffuser = Diffuser(num_timesteps, device=device)
-    model = DiT(
-        input_size=28,
-        patch_size=4,
-        in_channels=1,
-        hidden_size=192,
-        depth=6,
-        num_heads=4,
-        mlp_ratio=4.0,
-        class_dropout_prob=0.0,
-        num_classes=1,
-        learn_sigma=False,
-    )
-    model.to(device)
-    optimizer = Adam(model.parameters(), lr=lr)
+model = DiT(
+    input_size=input_size,
+    patch_size=patch_size,
+    in_channels=in_channels,
+    hidden_size=hidden_size,
+    depth=depth,
+    num_heads=num_heads,
+    mlp_ratio=mlp_ratio,
+    num_classes=num_classes,
+    learn_sigma=learn_sigma,
+)
 
-    scaler = torch.amp.GradScaler(enabled=(device in ["cuda", "mps"]))
-
-    losses = []
-    for epoch in range(epochs):
-        loss_sum = 0.0
-        cnt = 0
-        for images, labels in tqdm(dataloader):
-            x = images.to(device)
-            t = torch.randint(1, num_timesteps + 1, (len(x),), device=device)
-            x_noisy, noise = diffuser.add_noise(x, t)
-            y = torch.zeros((x_noisy.size(0),), dtype=torch.long, device=device)
-
-            optimizer.zero_grad()
-            with torch.autocast(
-                device_type=device_type,
-                dtype=torch.float16,
-                enabled=(device in ["cuda", "mps"]),
-            ):
-                noise_pred = model(x_noisy, t, y)
-                loss = F.mse_loss(noise, noise_pred)
-
-            scaler.scale(loss).to(torch.float32).backward()
-            scaler.step(optimizer)
-            scaler.update()
-
-            loss_sum += loss.item()
-            cnt += 1
-
-        loss_avg = loss_sum / cnt
-        losses.append(loss_avg)
-        print(f"Epoch {epoch} | Loss: {loss_avg}")
-
-    torch.save(model.state_dict(), "transformer_diffusion_model.pth")
-
-    plt.plot(losses)
-    plt.xlabel("Epoch")
-    plt.ylabel("Loss")
-    plt.show()
-
-    # サンプリング
-    model.eval()
-    diffuser = Diffuser(num_timesteps, device=device)
-    model.to(device)
-    with torch.autocast(
-        device_type=device_type,
-        dtype=torch.float16,
-        enabled=(device in ["cuda", "mps"]),
-    ):
-        images = diffuser.sample(model)
-
-    def show_images(images, rows=2, cols=10):
-        fig = plt.figure(figsize=(cols, rows))
-        i = 0
-        for r in range(rows):
-            for c in range(cols):
-                fig.add_subplot(rows, cols, i + 1)
-                plt.imshow(images[i], cmap="gray")
-                plt.axis("off")
-                i += 1
-        plt.show()
-
-    show_images(images)
+num_timesteps = 1000
+device = (
+    "cuda"
+    if torch.cuda.is_available()
+    else "mps"
+    if hasattr(torch.backends, "mps") and torch.backends.mps.is_available()
+    else "cpu"
+)
+print(f"Using device: {device}")
+diffuser = DiffuserCond(num_timesteps, device=device)
