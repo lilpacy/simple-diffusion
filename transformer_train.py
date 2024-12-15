@@ -5,6 +5,7 @@ from torch.utils.data import DataLoader, Dataset
 from transformers import GPT2TokenizerFast, get_linear_schedule_with_warmup
 import tqdm
 import random
+from concurrent.futures import ThreadPoolExecutor
 
 from transformer import SimpleTransformer
 
@@ -15,6 +16,7 @@ device = (
     if torch.backends.mps.is_available()
     else "cpu"
 )
+print(f"Using device: {device}")
 torch.manual_seed(42)
 random.seed(42)
 
@@ -25,11 +27,20 @@ tokenizer.pad_token = tokenizer.eos_token
 class TextDataset(Dataset):
     def __init__(self, texts, tokenizer, max_length=128):
         self.examples = []
-        for t in texts:
-            enc = tokenizer.encode(t, truncation=True, max_length=max_length)
+        with ThreadPoolExecutor() as executor:
+            results = list(
+                executor.map(
+                    lambda t: tokenizer.encode(
+                        t, truncation=True, max_length=max_length
+                    ),
+                    texts,
+                )
+            )
+        for enc in results:
             if len(enc) < 2:
                 continue
             self.examples.append(enc)
+        print(f"len(self.examples): {len(self.examples)}")
 
     def __len__(self):
         return len(self.examples)
@@ -58,20 +69,21 @@ def collate_fn(batch):
 def load_data():
     from datasets import load_dataset
 
-    dataset = load_dataset("Salesforce/wikitext", "wikitext-2-raw-v1")
+    dataset = load_dataset("globis-university/aozorabunko-clean")
     texts = dataset["train"]["text"]
     # texts = ["Once upon a time there was a brave princess who"] * 2000
     return texts
 
 
 texts = load_data()
+print(f"texts[0]: {texts[0]}")
 train_dataset = TextDataset(texts, tokenizer, max_length=128)
 train_dataloader = DataLoader(
     train_dataset, batch_size=2, shuffle=True, collate_fn=collate_fn
 )
 
 model = SimpleTransformer(
-    vocab_size=len(tokenizer), model_dim=32, num_heads=2, num_layers=2
+    vocab_size=len(tokenizer), model_dim=256, num_heads=4, num_layers=4
 ).to(device)
 optimizer = torch.optim.Adam(model.parameters(), lr=1e-4)
 
@@ -81,7 +93,8 @@ scheduler = get_linear_schedule_with_warmup(
     optimizer, num_warmup_steps=warmup_steps, num_training_steps=total_steps
 )
 
-
+# print(model.sample_text(tokenizer, "Once upon a time"))
+print(model.sample_text(tokenizer, "むかしむかしあるところに"))
 for epoch in range(10):
     model.train()
     total_loss = 0
@@ -103,6 +116,7 @@ for epoch in range(10):
         scheduler.step()
         total_loss += loss.item()
     print("Epoch:", epoch + 1, "Loss:", total_loss / len(train_dataloader))
-    print(model.sample_text(tokenizer, "Once upon a time"))
+    # print(model.sample_text(tokenizer, "Once upon a time"))
+    print(model.sample_text(tokenizer, "むかしむかしあるところに"))
 
 torch.save(model.state_dict(), "transformer_model.pth")
