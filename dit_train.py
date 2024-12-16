@@ -10,14 +10,13 @@ from copy import deepcopy
 
 from dit import model, diffuser, device, num_timesteps
 
-# 学習の効率化
 # torch.backends.cuda.matmul.allow_tf32 = True
 # torch.backends.cudnn.allow_tf32 = True
 
 batch_size = 64
 epochs = 10
-lr = 5e-4  # 学習率を1e-4に設定
-ema_decay = 0.9999  # EMAの減衰率を設定
+lr = 5e-4
+ema_decay = 0.9999
 
 preprocess = transforms.ToTensor()
 dataset = torchvision.datasets.MNIST(
@@ -26,7 +25,7 @@ dataset = torchvision.datasets.MNIST(
 dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True, pin_memory=True)
 
 model.to(device)
-ema_model = deepcopy(model).to(device)  # EMAモデルの作成
+ema_model = deepcopy(model).to(device)
 optimizer = AdamW(model.parameters(), lr=lr)
 
 losses = []
@@ -47,7 +46,6 @@ for epoch in range(epochs):
         loss.backward()
         optimizer.step()
 
-        # EMAの更新
         with torch.no_grad():
             for ema_param, param in zip(ema_model.parameters(), model.parameters()):
                 ema_param.data.mul_(ema_decay).add_(param.data, alpha=1 - ema_decay)
