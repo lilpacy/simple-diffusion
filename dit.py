@@ -4,66 +4,103 @@ import math
 import numpy as np
 from torchvision import transforms
 from tqdm import tqdm
+from timm.models.vision_transformer import PatchEmbed, Attention, Mlp
+
+# class PatchEmbed(nn.Module):
+#     def __init__(self, img_size, patch_size, in_chans, embed_dim, bias=True):
+#         super().__init__()
+#         assert img_size % patch_size == 0, "Image size must be divisible by patch size."
+#         self.img_size = img_size
+#         self.patch_size = patch_size
+#         self.num_patches = (img_size // patch_size) * (img_size // patch_size)
+#         self.proj = nn.Conv2d(
+#             in_chans, embed_dim, kernel_size=patch_size, stride=patch_size, bias=bias
+#         )
+
+#     def forward(self, x):
+#         x = self.proj(x)
+#         x = x.flatten(2).transpose(1, 2)
+#         return x
 
 
-class PatchEmbed(nn.Module):
-    def __init__(self, img_size, patch_size, in_chans, embed_dim, bias=True):
-        super().__init__()
-        assert img_size % patch_size == 0, "Image size must be divisible by patch size."
-        self.img_size = img_size
-        self.patch_size = patch_size
-        self.num_patches = (img_size // patch_size) * (img_size // patch_size)
-        self.proj = nn.Conv2d(
-            in_chans, embed_dim, kernel_size=patch_size, stride=patch_size, bias=bias
-        )
+# class Attention(nn.Module):
+#     def __init__(self, dim, num_heads=8, qkv_bias=True, **kwargs):
+#         super().__init__()
+#         self.num_heads = num_heads
+#         head_dim = dim // num_heads
+#         self.scale = head_dim**-0.5
+#         self.qkv = nn.Linear(dim, dim * 3, bias=qkv_bias)
+#         self.proj = nn.Linear(dim, dim)
 
-    def forward(self, x):
-        x = self.proj(x)
-        x = x.flatten(2).transpose(1, 2)
-        return x
-
-
-class Attention(nn.Module):
-    def __init__(self, dim, num_heads=8, qkv_bias=True, **kwargs):
-        super().__init__()
-        self.num_heads = num_heads
-        head_dim = dim // num_heads
-        self.scale = head_dim**-0.5
-        self.qkv = nn.Linear(dim, dim * 3, bias=qkv_bias)
-        self.proj = nn.Linear(dim, dim)
-
-    def forward(self, x):
-        N, T, D = x.shape
-        qkv = self.qkv(x)
-        qkv = qkv.reshape(N, T, 3, self.num_heads, D // self.num_heads)
-        q, k, v = qkv[:, :, 0], qkv[:, :, 1], qkv[:, :, 2]
-        attn = (q * self.scale) @ k.transpose(-2, -1)
-        attn = attn.softmax(dim=-1)
-        out = (attn @ v).transpose(2, 1).reshape(N, T, D)
-        out = self.proj(out)
-        return out
+#     def forward(self, x):
+#         N, T, D = x.shape
+#         qkv = self.qkv(x)
+#         qkv = qkv.reshape(N, T, 3, self.num_heads, D // self.num_heads)
+#         q, k, v = qkv[:, :, 0], qkv[:, :, 1], qkv[:, :, 2]
+#         attn = (q * self.scale) @ k.transpose(-2, -1)
+#         attn = attn.softmax(dim=-1)
+#         out = (attn @ v).transpose(2, 1).reshape(N, T, D)
+#         out = self.proj(out)
+#         return out
 
 
-class Mlp(nn.Module):
-    def __init__(self, in_features, hidden_features, act_layer=nn.GELU, drop=0.0):
-        super().__init__()
-        self.fc1 = nn.Linear(in_features, hidden_features)
-        self.act = act_layer()
-        self.fc2 = nn.Linear(hidden_features, in_features)
-        self.drop = nn.Dropout(drop)
+# class Mlp(nn.Module):
+#     def __init__(self, in_features, hidden_features, act_layer=nn.GELU, drop=0.0):
+#         super().__init__()
+#         self.fc1 = nn.Linear(in_features, hidden_features)
+#         self.act = act_layer()
+#         self.fc2 = nn.Linear(hidden_features, in_features)
+#         self.drop = nn.Dropout(drop)
 
-    def forward(self, x):
-        x = self.fc1(x)
-        x = self.act(x)
-        x = self.drop(x)
-        x = self.fc2(x)
-        x = self.drop(x)
-        return x
+#     def forward(self, x):
+#         x = self.fc1(x)
+#         x = self.act(x)
+#         x = self.drop(x)
+#         x = self.fc2(x)
+#         x = self.drop(x)
+#         return x
 
 
 def modulate(x, shift, scale):
     return x * (1 + scale.unsqueeze(1)) + shift.unsqueeze(1)
 
+def get_2d_sincos_pos_embed(embed_dim, grid_size, cls_token=False, extra_tokens=0):
+    grid_h = np.arange(grid_size, dtype=np.float32)
+    grid_w = np.arange(grid_size, dtype=np.float32)
+    grid = np.meshgrid(grid_w, grid_h)  # here w goes first
+    grid = np.stack(grid, axis=0)
+
+    grid = grid.reshape([2, 1, grid_size, grid_size])
+    pos_embed = get_2d_sincos_pos_embed_from_grid(embed_dim, grid)
+    if cls_token and extra_tokens > 0:
+        pos_embed = np.concatenate(
+            [np.zeros([extra_tokens, embed_dim]), pos_embed], axis=0
+        )
+    return pos_embed
+
+
+def get_2d_sincos_pos_embed_from_grid(embed_dim, grid):
+    assert embed_dim % 2 == 0
+    emb_h = get_1d_sincos_pos_embed_from_grid(embed_dim // 2, grid[0])
+    emb_w = get_1d_sincos_pos_embed_from_grid(embed_dim // 2, grid[1])
+    emb = np.concatenate([emb_h, emb_w], axis=1)
+    return emb
+
+
+def get_1d_sincos_pos_embed_from_grid(embed_dim, pos):
+    assert embed_dim % 2 == 0
+    omega = np.arange(embed_dim // 2, dtype=np.float64)
+    omega /= embed_dim / 2.0
+    omega = 1.0 / 10000**omega  # (D/2,)
+
+    pos = pos.reshape(-1)  # (M,)
+    out = np.einsum("m,d->md", pos, omega)  # (M, D/2), outer product
+
+    emb_sin = np.sin(out)  # (M, D/2)
+    emb_cos = np.cos(out)  # (M, D/2)
+
+    emb = np.concatenate([emb_sin, emb_cos], axis=1)  # (M, D)
+    return emb
 
 class TimestepEmbedder(nn.Module):
     def __init__(self, hidden_size, frequency_embedding_size=256):
@@ -96,16 +133,33 @@ class TimestepEmbedder(nn.Module):
         t_emb = self.mlp(t_freq)
         return t_emb
 
-
 class LabelEmbedder(nn.Module):
-    def __init__(self, num_classes, hidden_size):
+    # クラスドロップアウトを追加
+    def __init__(self, num_classes, hidden_size, dropout_prob=0.1):
         super().__init__()
-        self.embedding_table = nn.Embedding(num_classes, hidden_size)
+        use_cfg_embedding = dropout_prob > 0
+        self.embedding_table = nn.Embedding(
+            num_classes + use_cfg_embedding, hidden_size
+        )
+        self.num_classes = num_classes
+        self.dropout_prob = dropout_prob
 
-    def forward(self, labels):
+    def token_drop(self, labels, force_drop_ids=None):
+        if force_drop_ids is None:
+            drop_ids = (
+                torch.rand(labels.shape[0], device=labels.device) < self.dropout_prob
+            )
+        else:
+            drop_ids = force_drop_ids == 1
+        labels = torch.where(drop_ids, self.num_classes, labels)
+        return labels
+
+    def forward(self, labels, train=True, force_drop_ids=None):
+        use_dropout = self.dropout_prob > 0
+        if (train and use_dropout) or (force_drop_ids is not None):
+            labels = self.token_drop(labels, force_drop_ids)
         embeddings = self.embedding_table(labels)
         return embeddings
-
 
 class DiTBlock(nn.Module):
     def __init__(self, hidden_size, num_heads, mlp_ratio=4.0, **block_kwargs):
@@ -116,10 +170,11 @@ class DiTBlock(nn.Module):
         )
         self.norm2 = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
         mlp_hidden_dim = int(hidden_size * mlp_ratio)
+        approx_gelu = lambda: nn.GELU(approximate="tanh")
         self.mlp = Mlp(
             in_features=hidden_size,
             hidden_features=mlp_hidden_dim,
-            act_layer=nn.GELU,
+            act_layer=approx_gelu,
             drop=0,
         )
         self.adaLN_modulation = nn.Sequential(
@@ -138,7 +193,6 @@ class DiTBlock(nn.Module):
         )
         return x
 
-
 class FinalLayer(nn.Module):
     def __init__(self, hidden_size, patch_size, out_channels):
         super().__init__()
@@ -156,66 +210,33 @@ class FinalLayer(nn.Module):
         x = self.linear(x)
         return x
 
-
-def get_2d_sincos_pos_embed(embed_dim, grid_size, cls_token=False, extra_tokens=0):
-    grid_h = np.arange(grid_size, dtype=np.float32)
-    grid_w = np.arange(grid_size, dtype=np.float32)
-    grid = np.meshgrid(grid_w, grid_h)
-    grid = np.stack(grid, axis=0)
-    grid = grid.reshape([2, 1, grid_size, grid_size])
-    pos_embed = get_2d_sincos_pos_embed_from_grid(embed_dim, grid)
-    if cls_token and extra_tokens > 0:
-        pos_embed = np.concatenate(
-            [np.zeros([extra_tokens, embed_dim]), pos_embed], axis=0
-        )
-    return pos_embed
-
-
-def get_2d_sincos_pos_embed_from_grid(embed_dim, grid):
-    assert embed_dim % 2 == 0
-    emb_h = get_1d_sincos_pos_embed_from_grid(embed_dim // 2, grid[0])
-    emb_w = get_1d_sincos_pos_embed_from_grid(embed_dim // 2, grid[1])
-    emb = np.concatenate([emb_h, emb_w], axis=1)
-    return emb
-
-
-def get_1d_sincos_pos_embed_from_grid(embed_dim, pos):
-    assert embed_dim % 2 == 0
-    omega = np.arange(embed_dim // 2, dtype=np.float64)
-    omega /= embed_dim / 2.0
-    omega = 1.0 / 10000**omega
-    pos = pos.reshape(-1)
-    out = np.einsum("m,d->md", pos, omega)
-    emb_sin = np.sin(out)
-    emb_cos = np.cos(out)
-    emb = np.concatenate([emb_sin, emb_cos], axis=1)
-    return emb
-
-
 class DiT(nn.Module):
     def __init__(
         self,
-        input_size=28,
-        patch_size=2,  # 小さくしてより細かい特徴を捉える
-        in_channels=1,
-        hidden_size=192,  # 大きくしてモデル容量増加
-        depth=6,  # ブロック数を2倍に増やす
-        num_heads=4,
+        input_size=32,
+        patch_size=2,
+        in_channels=4,
+        hidden_size=384,
+        depth=12,
+        num_heads=6,
         mlp_ratio=4.0,
-        num_classes=1,
+        num_classes=10,
         learn_sigma=False,
+        class_dropout_prob=0.1,  # クラスドロップアウト確率を追加
     ):
         super().__init__()
         self.learn_sigma = learn_sigma
         self.in_channels = in_channels
         self.out_channels = in_channels * 2 if learn_sigma else in_channels
         self.patch_size = patch_size
+        self.num_heads = num_heads
 
         self.x_embedder = PatchEmbed(
             input_size, patch_size, in_channels, hidden_size, bias=True
         )
         self.t_embedder = TimestepEmbedder(hidden_size)
-        self.y_embedder = LabelEmbedder(num_classes, hidden_size)
+        # クラスドロップアウトを含むLabelEmbedderを使用
+        self.y_embedder = LabelEmbedder(num_classes, hidden_size, class_dropout_prob)
 
         num_patches = self.x_embedder.num_patches
         self.pos_embed = nn.Parameter(
@@ -232,6 +253,7 @@ class DiT(nn.Module):
         self.initialize_weights()
 
     def initialize_weights(self):
+        # 重みの初期化をfacebook版と同様に実装
         def _basic_init(module):
             if isinstance(module, nn.Linear):
                 torch.nn.init.xavier_uniform_(module.weight)
@@ -249,6 +271,8 @@ class DiT(nn.Module):
         nn.init.xavier_uniform_(w.view([w.shape[0], -1]))
         nn.init.constant_(self.x_embedder.proj.bias, 0)
 
+        # 追加の初期化処理
+        nn.init.normal_(self.y_embedder.embedding_table.weight, std=0.02)
         nn.init.normal_(self.t_embedder.mlp[0].weight, std=0.02)
         nn.init.normal_(self.t_embedder.mlp[2].weight, std=0.02)
 
@@ -258,7 +282,7 @@ class DiT(nn.Module):
 
         nn.init.constant_(self.final_layer.adaLN_modulation[-1].weight, 0)
         nn.init.constant_(self.final_layer.adaLN_modulation[-1].bias, 0)
-        nn.init.xavier_uniform_(self.final_layer.linear.weight)  # 修正箇所
+        nn.init.constant_(self.final_layer.linear.weight, 0)
         nn.init.constant_(self.final_layer.linear.bias, 0)
 
     def unpatchify(self, x):
@@ -266,20 +290,32 @@ class DiT(nn.Module):
         p = self.patch_size
         h = w = int(x.shape[1] ** 0.5)
         x = x.reshape(shape=(x.shape[0], h, w, p, p, c))
-        x = x.permute(0, 5, 1, 3, 2, 4)
-        x = x.reshape(shape=(x.shape[0], c, h * p, w * p))
-        return x
+        # einsumを使用した効率的な実装
+        x = torch.einsum("nhwpqc->nchpwq", x)
+        imgs = x.reshape(shape=(x.shape[0], c, h * p, h * p))
+        return imgs
 
-    def forward(self, x, t, labels):
+    def forward(self, x, t, y):
         x = self.x_embedder(x) + self.pos_embed
-        t_emb = self.t_embedder(t)
-        y_emb = self.y_embedder(labels)
-        c = t_emb + y_emb
+        t = self.t_embedder(t)
+        y = self.y_embedder(y, self.training)
+        c = t + y
         for block in self.blocks:
             x = block(x, c)
         x = self.final_layer(x, c)
         x = self.unpatchify(x)
         return x
+
+    # classifier-free guidanceのサポートを追加
+    def forward_with_cfg(self, x, t, y, cfg_scale):
+        half = x[: len(x) // 2]
+        combined = torch.cat([half, half], dim=0)
+        model_out = self.forward(combined, t, y)
+        eps, rest = model_out[:, :3], model_out[:, 3:]
+        cond_eps, uncond_eps = torch.split(eps, len(eps) // 2, dim=0)
+        half_eps = uncond_eps + cfg_scale * (cond_eps - uncond_eps)
+        eps = torch.cat([half_eps, half_eps], dim=0)
+        return torch.cat([eps, rest], dim=1)
 
 
 class DiffuserCond:
@@ -358,13 +394,13 @@ class DiffuserCond:
 
 # モデルのハイパーパラメータ
 input_size = 28
-patch_size = 2
+patch_size = 4
 in_channels = 1
-hidden_size = 192
-depth = 6
-num_heads = 4
+hidden_size = 384
+depth = 12
+num_heads = 6
 mlp_ratio = 4.0
-num_classes = 1
+num_classes = 10
 learn_sigma = False
 
 model = DiT(
